@@ -1,90 +1,35 @@
-# Gezx Compressor Bot
+here# Gezx Fast Video Compressor Bot
 
-A Telegram video compressor built with Python, Pyrogram and FFmpeg.
+Telegram video compressor using Pyrogram, FFmpeg and Render.
 
-## Features
+## Behavior
 
-- Video compression without a fixed target size
-- Adaptive CRF
-- Up to Telegram's supported MTProto file size
-- Multiple audio tracks preserved
-- Audio streams copied without re-encoding
-- Subtitle streams preserved when the selected container supports them
-- Metadata preservation
-- Chapter preservation
-- MP4/MKV container selection
-- Download progress
-- Compression progress
-- Upload progress
-- ETA and speed information
-- Job cancellation
-- Automatic temporary-file cleanup
-- Docker deployment
-- Render worker deployment
+- Main video stream is re-encoded with adaptive CRF.
+- All audio streams are copied without re-encoding.
+- All subtitle streams are copied.
+- Metadata and chapters are preserved.
+- Additional video streams are copied and force MKV output.
+- MP4 is used only when the copied audio/subtitle streams are conservatively compatible.
+- Temporary files are removed after each job.
+- Download, compression and upload progress are shown.
+- `/cancel` can cancel the active job.
 
-## Architecture
+## Environment variables
 
-Telegram
-↓
-Pyrogram / MTProto
-↓
-Download
-↓
-FFprobe
-↓
-Media analysis
-↓
-FFmpeg
-↓
-Video compression
-↓
-Audio/subtitle preservation
-↓
-Output verification
-↓
-Telegram upload
-↓
-Cleanup
+Required:
 
-## Environment Variables
-
-The following variables are required:
-
-BOT_TOKEN
-API_ID
-API_HASH
+- `BOT_TOKEN`
+- `API_ID`
+- `API_HASH`
 
 Optional:
 
-WORK_DIR
+- `WORK_DIR` (defaults to `/tmp/fast-video-compressor`)
 
-Default:
-
-/tmp/fast-video-compressor
+Render provides `PORT` automatically.
 
 ## Important
 
-The bot does not use a fixed output-size target such as 130 MB.
+A smaller output size is not guaranteed for every source. CRF-based compression is quality-targeted, not a fixed-size encoder. Large audio tracks that are copied exactly can also make the final file relatively large.
 
-The final size depends on:
-
-- Source resolution
-- Source bitrate
-- Frame rate
-- Video complexity
-- CRF
-- Audio/subtitle streams
-
-Audio streams are copied rather than re-encoded.
-
-Therefore the final file size can vary significantly.
-
-## Deployment
-
-The project is designed to run as a Docker worker.
-
-FFmpeg and FFprobe are installed through the Docker image.
-
-Do not place Telegram credentials directly inside the source code.
-
-Use Render environment variables instead.
+The Render Free plan has resource and sleeping limitations. A 2 GB input may exceed the available CPU, RAM, disk or execution capacity even though the Telegram transfer path can handle large files.
