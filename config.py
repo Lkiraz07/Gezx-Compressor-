@@ -4,11 +4,20 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 
-# Compression defaults
-DEFAULT_TARGET_MB = int(os.getenv("DEFAULT_TARGET_MB", "130"))
+# Maximum input size: 2 GB
+MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024
 
-# Temporary working directory
-DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "/tmp/compressor")
+# Working directory
+WORK_DIR = os.getenv(
+    "WORK_DIR",
+    "/tmp/fast-video-compressor"
+)
 
-# Maximum input size we allow the bot to attempt
-MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
+# Adaptive compression settings
+MIN_VIDEO_BITRATE_KBPS = 250
+MAX_VIDEO_BITRATE_KBPS = 12000
+
+# Quality targets
+BALANCED_CRF = 24
+MAX_COMPRESSION_CRF = 30
+HIGH_QUALITY_CRF = 20
