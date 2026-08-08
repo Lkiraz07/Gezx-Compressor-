@@ -1,522 +1,142 @@
-import asyncio
+hereimport asyncio
+import os
 import shutil
 import time
 from pathlib import Path
 
+from aiohttp import web
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-from config import (
-    API_HASH,
-    API_ID,
-    BOT_TOKEN,
-    MAX_FILE_SIZE,
-    WORK_DIR,
-)
-
+from config import API_HASH, API_ID, BOT_TOKEN, MAX_FILE_SIZE, MAX_OUTPUT_SIZE, WORK_DIR, validate_config
 from compressor import compress_video
 from media import analyze_media, media_summary
-from progress import (
-    ProgressTracker,
-    compression_progress_callback,
-)
-from utils import (
-    build_output_path,
-    human_size,
-    safe_filename,
-)
+from progress import ProgressTracker, compression_progress_callback
+from utils import build_output_path, human_size, safe_filename
 
 
-# ============================================================
-# Telegram Client
-# ============================================================
-
-app = Client(
-    "fast_video_compressor",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-)
-
-
-# ============================================================
-# Active jobs
-# ============================================================
-
+app = Client("fast_video_compressor", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 active_jobs = {}
 
 
 def get_user_id(message: Message) -> int:
+    return message.from_user.id if message.from_user else message.chat.id
 
-    if message.from_user:
-        return message.from_user.id
-
-    return message.chat.id
-
-
-# ============================================================
-# /start
-# ============================================================
 
 @app.on_message(filters.command("start"))
-async def start_command(
-    client: Client,
-    message: Message,
-):
-
+async def start_command(client: Client, message: Message):
     await message.reply_text(
         "Fast Video Compressor\n\n"
-        "Send a video or video file and I will "
-        "compress the video while preserving "
-        "audio tracks and subtitles whenever possible.\n\n"
-        "Commands:\n"
+        "Send a video or video file. The video stream is compressed while audio and subtitle streams are copied.\n\n"
         "/cancel - cancel your current job"
     )
 
 
-# ============================================================
-# /cancel
-# ============================================================
-
 @app.on_message(filters.command("cancel"))
-async def cancel_command(
-    client: Client,
-    message: Message,
-):
-
+async def cancel_command(client: Client, message: Message):
     user_id = get_user_id(message)
-
     job = active_jobs.get(user_id)
-
     if job is None:
-
-        await message.reply_text(
-            "You don't have an active job."
-        )
-
+        await message.reply_text("You don't have an active job.")
         return
-
     job["cancel"] = True
-
-    await message.reply_text(
-        "Cancellation requested."
-    )
+    await message.reply_text("Cancellation requested.")
 
 
-# ============================================================
-# Get file size
-# ============================================================
-
-def get_file_size(
-    message: Message,
-) -> int:
-
+def get_file_size(message: Message) -> int:
     if message.video:
-
-        return (
-            message.video.file_size
-            or 0
-        )
-
+        return message.video.file_size or 0
     if message.document:
-
-        return (
-            message.document.file_size
-            or 0
-        )
-
+        return message.document.file_size or 0
     return 0
 
 
-# ============================================================
-# Get filename
-# ============================================================
-
-def get_filename(
-    message: Message,
-) -> str:
-
-    if message.document:
-
-        if message.document.file_name:
-
-            return safe_filename(
-                message.document.file_name
-            )
-
-    if message.video:
-
-        if message.video.file_name:
-
-            return safe_filename(
-                message.video.file_name
-            )
-
-    return (
-        f"video_{message.id}.mp4"
-    )
+def get_filename(message: Message) -> str:
+    if message.document and message.document.file_name:
+        return safe_filename(message.document.file_name)
+    if message.video and message.video.file_name:
+        return safe_filename(message.video.file_name)
+    return f"video_{message.id}.mp4"
 
 
-# ============================================================
-# Download callback
-# ============================================================
-
-async def download_progress(
-    current: int,
-    total: int,
-    tracker: ProgressTracker,
-):
-
-    await tracker.render(
-        current=current,
-        total=total,
-    )
-
-
-# ============================================================
-# Upload callback
-# ============================================================
-
-async def upload_progress(
-    current: int,
-    total: int,
-    tracker: ProgressTracker,
-):
-
-    await tracker.render(
-        current=current,
-        total=total,
-    )
-
-
-# ============================================================
-# Main handler
-# ============================================================
-
-@app.on_message(
-    filters.video
-    | filters.document
-)
-async def video_handler(
-    client: Client,
-    message: Message,
-):
-
+@app.on_message(filters.video | filters.document)
+async def video_handler(client: Client, message: Message):
     user_id = get_user_id(message)
-
-    # --------------------------------------------------------
-    # One job per user
-    # --------------------------------------------------------
-
     if user_id in active_jobs:
-
-        await message.reply_text(
-            "You already have a compression job running."
-        )
-
+        await message.reply_text("You already have a compression job running.")
         return
 
-    file_size = get_file_size(
-        message
-    )
-
+    file_size = get_file_size(message)
     if file_size <= 0:
-
-        await message.reply_text(
-            "I couldn't determine the file size."
-        )
-
+        await message.reply_text("I couldn't determine the file size.")
         return
-
-    # --------------------------------------------------------
-    # Input limit
-    # --------------------------------------------------------
-
     if file_size > MAX_FILE_SIZE:
-
-        await message.reply_text(
-            "This file is larger than the "
-            "current 2 GB input limit."
-        )
-
+        await message.reply_text("This file is larger than the 2000 MiB input limit.")
         return
 
-    filename = get_filename(
-        message
-    )
-
-    # --------------------------------------------------------
-    # Create job directory
-    # --------------------------------------------------------
-
-    job_dir = (
-        Path(WORK_DIR)
-        / str(user_id)
-        / str(message.id)
-    )
-
-    job_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    input_file = (
-        job_dir
-        / filename
-    )
-
-    active_jobs[user_id] = {
-        "cancel": False,
-        "directory": str(job_dir),
-    }
-
-    status = await message.reply_text(
-        "Preparing..."
-    )
-
+    filename = get_filename(message)
+    job_dir = Path(WORK_DIR) / str(user_id) / str(message.id)
+    job_dir.mkdir(parents=True, exist_ok=True)
+    input_file = job_dir / filename
+    active_jobs[user_id] = {"cancel": False}
+    status = await message.reply_text("Preparing...")
     started = time.monotonic()
 
     try:
+        tracker = ProgressTracker(status, "Downloading", file_size)
 
-        # ====================================================
-        # DOWNLOAD
-        # ====================================================
+        async def download_callback(current, total):
+            await tracker.render(current, total)
 
-        download_tracker = ProgressTracker(
-            message=status,
-            operation="Downloading",
-            total=file_size,
-        )
-
-        async def download_callback(
-            current,
-            total,
-        ):
-
-            await download_progress(
-                current,
-                total,
-                download_tracker,
-            )
-
-        await client.download_media(
-            message,
-            file_name=str(
-                input_file
-            ),
-            progress=download_callback,
-        )
-
-        # Check cancellation after download.
-
+        await client.download_media(message, file_name=str(input_file), progress=download_callback)
         if active_jobs[user_id]["cancel"]:
-
             raise asyncio.CancelledError
+        if not input_file.is_file() or input_file.stat().st_size <= 0:
+            raise RuntimeError("Download failed or produced an empty file.")
 
-        # Verify download.
+        await status.edit_text("Analyzing media...")
+        media = await analyze_media(str(input_file))
+        await status.edit_text("Media detected\n\n" + media_summary(media) + "\n\nPreparing compression...")
 
-        if not input_file.is_file():
-
-            raise RuntimeError(
-                "Download completed but "
-                "the file was not found."
-            )
-
-        downloaded_size = (
-            input_file.stat().st_size
-        )
-
-        if downloaded_size <= 0:
-
-            raise RuntimeError(
-                "Downloaded file is empty."
-            )
-
-        # ====================================================
-        # ANALYZE
-        # ====================================================
-
-        await status.edit_text(
-            "Analyzing media..."
-        )
-
-        media = await analyze_media(
-            str(input_file)
-        )
-
-        # Show information.
-
-        summary = media_summary(
-            media
-        )
-
-        await status.edit_text(
-            "Media detected\n\n"
-            f"{summary}\n\n"
-            "Preparing compression..."
-        )
-
-        # ====================================================
-        # OUTPUT
-        # ====================================================
-
-        output_file = build_output_path(
-            str(input_file),
-            media,
-        )
-
-        # ====================================================
-        # COMPRESSION
-        # ====================================================
-
-        compression_tracker = ProgressTracker(
-            message=status,
-            operation="Compressing",
-        )
-
-        compression_callback = (
-            compression_progress_callback(
-                compression_tracker
-            )
-        )
+        output_file = build_output_path(str(input_file), media)
+        compression_tracker = ProgressTracker(status, "Compressing")
+        compression_callback = compression_progress_callback(compression_tracker)
 
         async def cancel_callback():
-
-            job = active_jobs.get(
-                user_id
-            )
-
-            if job is None:
-                return True
-
-            return job["cancel"]
+            job = active_jobs.get(user_id)
+            return job is None or job.get("cancel", False)
 
         result = await compress_video(
-            input_file=str(
-                input_file
-            ),
-
-            output_file=output_file,
-
-            media=media,
-
-            progress_callback=(
-                compression_callback
-            ),
-
-            cancel_callback=(
-                cancel_callback
-            ),
+            str(input_file), output_file, media,
+            progress_callback=compression_callback,
+            cancel_callback=cancel_callback,
         )
 
-        # ====================================================
-        # VERIFY CANCELLATION
-        # ====================================================
+        output_path = Path(result.output_file)
+        if not output_path.is_file() or output_path.stat().st_size <= 0:
+            raise RuntimeError("Compression produced no valid output file.")
 
-        if active_jobs[user_id]["cancel"]:
+        compressed_size = output_path.stat().st_size
+        if compressed_size > MAX_OUTPUT_SIZE:
+            raise RuntimeError("The compressed file is still larger than Telegram's 2000 MiB limit.")
 
-            raise asyncio.CancelledError
+        original_size = result.original_size
+        saved_bytes = max(0, original_size - compressed_size)
+        reduction = (saved_bytes / original_size * 100) if original_size else 0.0
 
-        # ====================================================
-        # VERIFY OUTPUT
-        # ====================================================
+        await status.edit_text("Uploading...")
+        upload_tracker = ProgressTracker(status, "Uploading", compressed_size)
 
-        output_path = Path(
-            result.output_file
-        )
-
-        if not output_path.is_file():
-
-            raise RuntimeError(
-                "Compression finished but "
-                "the output file does not exist."
-            )
-
-        if output_path.stat().st_size <= 0:
-
-            raise RuntimeError(
-                "The compressed file is empty."
-            )
-
-        # ====================================================
-        # SIZE CALCULATION
-        # ====================================================
-
-        original_size = (
-            result.original_size
-        )
-
-        compressed_size = (
-            result.output_size
-        )
-
-        saved_bytes = (
-            original_size
-            - compressed_size
-        )
-
-        if original_size > 0:
-
-            reduction = (
-                saved_bytes
-                / original_size
-                * 100
-            )
-
-        else:
-
-            reduction = 0.0
-
-        # If compression somehow made the file larger,
-        # don't report negative "saved" size.
-
-        saved_text = human_size(
-            max(
-                0,
-                saved_bytes,
-            )
-        )
-
-        # ====================================================
-        # UPLOAD
-        # ====================================================
-
-        upload_tracker = ProgressTracker(
-            message=status,
-            operation="Uploading",
-            total=compressed_size,
-        )
-
-        async def upload_callback(
-            current,
-            total,
-        ):
-
-            await upload_progress(
-                current,
-                total,
-                upload_tracker,
-            )
-
-        extension = (
-            output_path.suffix.lower()
-        )
-
-        container_text = (
-            "MKV"
-            if extension == ".mkv"
-            else "MP4"
-        )
+        async def upload_callback(current, total):
+            await upload_tracker.render(current, total)
 
         caption = (
             "Compressed video\n\n"
-            f"Original: "
-            f"{human_size(original_size)}\n"
-            f"Compressed: "
-            f"{human_size(compressed_size)}\n"
-            f"Saved: {saved_text}\n"
+            f"Original: {human_size(original_size)}\n"
+            f"Compressed: {human_size(compressed_size)}\n"
+            f"Saved: {human_size(saved_bytes)}\n"
             f"Reduction: {reduction:.1f}%\n"
-            f"Container: {container_text}\n"
+            f"Container: {output_path.suffix.upper().lstrip('.') }\n"
             f"Video CRF: {result.crf}"
         )
 
@@ -527,96 +147,60 @@ async def video_handler(
             progress=upload_callback,
         )
 
-        # ====================================================
-        # COMPLETE
-        # ====================================================
-
-        elapsed = (
-            time.monotonic()
-            - started
-        )
-
+        elapsed = int(time.monotonic() - started)
         await status.edit_text(
             "Completed.\n\n"
-            f"Original: "
-            f"{human_size(original_size)}\n"
-            f"Compressed: "
-            f"{human_size(compressed_size)}\n"
-            f"Saved: {saved_text}\n"
+            f"Original: {human_size(original_size)}\n"
+            f"Compressed: {human_size(compressed_size)}\n"
+            f"Saved: {human_size(saved_bytes)}\n"
             f"Reduction: {reduction:.1f}%\n"
-            f"Time: {int(elapsed)} sec"
+            f"Time: {elapsed} sec"
         )
-
-    # ========================================================
-    # CANCELLED
-    # ========================================================
 
     except asyncio.CancelledError:
-
         try:
-
-            await status.edit_text(
-                "Compression cancelled."
-            )
-
+            await status.edit_text("Compression cancelled.")
         except Exception:
             pass
-
-    # ========================================================
-    # ERROR
-    # ========================================================
-
-    except Exception as error:
-
-        print(
-            "JOB ERROR:",
-            repr(error),
-        )
-
+    except Exception as exc:
+        print("JOB ERROR:", repr(exc))
         try:
-
-            await status.edit_text(
-                "Compression failed.\n\n"
-                f"{str(error)[:1500]}"
-            )
-
+            await status.edit_text("Compression failed.\n\n" + str(exc)[:1500])
         except Exception:
             pass
-
-    # ========================================================
-    # CLEANUP
-    # ========================================================
-
     finally:
-
-        active_jobs.pop(
-            user_id,
-            None,
-        )
-
-        try:
-
-            shutil.rmtree(
-                job_dir,
-                ignore_errors=True,
-            )
-
-        except Exception as cleanup_error:
-
-            print(
-                "Cleanup error:",
-                repr(cleanup_error),
-            )
+        active_jobs.pop(user_id, None)
+        shutil.rmtree(job_dir, ignore_errors=True)
 
 
-# ============================================================
-# Start bot
-# ============================================================
+async def health(request):
+    return web.Response(text="OK")
+
+
+async def start_health_server():
+    port = int(os.getenv("PORT", "10000"))
+    web_app = web.Application()
+    web_app.router.add_get("/", health)
+    web_app.router.add_get("/health", health)
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Health server listening on {port}")
+    return runner
+
+
+async def main():
+    validate_config()
+    runner = await start_health_server()
+    try:
+        await app.start()
+        print("Telegram bot started.")
+        await asyncio.Event().wait()
+    finally:
+        await app.stop()
+        await runner.cleanup()
+
 
 if __name__ == "__main__":
-
-    print(
-        "Fast Video Compressor is starting..."
-    )
-
-    app.run()
+    asyncio.run(main())
