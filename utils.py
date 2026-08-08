@@ -6,16 +6,18 @@ from typing import Optional
 from media import MediaInfo
 
 
-VIDEO_EXTENSIONS = {
-    ".mp4",
-    ".mkv",
-    ".mov",
-    ".avi",
-    ".webm",
-    ".m4v",
-    ".ts",
-    ".mts",
-    ".m2ts",
+MP4_AUDIO_CODECS = {
+    "aac",
+    "mp3",
+    "ac3",
+    "eac3",
+    "alac",
+}
+
+MP4_SUBTITLE_CODECS = {
+    "mov_text",
+    "subrip",
+    "srt",
 }
 
 
@@ -33,13 +35,9 @@ def human_size(size: int) -> str:
     return f"{size / 1024 ** 3:.2f} GB"
 
 
-def safe_filename(
-    filename: str,
-) -> str:
+def safe_filename(filename: str) -> str:
 
-    filename = os.path.basename(
-        filename
-    )
+    filename = os.path.basename(filename)
 
     filename = re.sub(
         r"[^\w.\- ()\[\]]+",
@@ -47,9 +45,7 @@ def safe_filename(
         filename,
     )
 
-    filename = filename.strip(
-        " ."
-    )
+    filename = filename.strip(" .")
 
     if not filename:
         filename = "video"
@@ -57,38 +53,40 @@ def safe_filename(
     return filename
 
 
-def get_extension(
-    filename: str,
-) -> str:
+def get_extension(filename: str) -> str:
 
-    return Path(
-        filename
-    ).suffix.lower()
+    return Path(filename).suffix.lower()
 
 
-def choose_output_extension(
+def mp4_can_contain_audio(
     media: MediaInfo,
-) -> str:
+) -> bool:
+    """
+    Check whether every audio stream is suitable
+    for our MP4 output.
 
-    # MP4 can safely contain common text
-    # subtitle formats such as mov_text.
-    #
-    # But many subtitle streams (ASS/SSA,
-    # PGS, VobSub, etc.) should remain in MKV.
-    #
-    # If ANY subtitle stream isn't suitable
-    # for MP4, use MKV.
+    We COPY audio instead of re-encoding it.
+    """
 
-    incompatible_subtitles = {
-        "ass",
-        "ssa",
-        "hdmv_pgs_subtitle",
-        "pgssub",
-        "dvd_subtitle",
-        "vobsub",
-        "dvb_subtitle",
-        "xsub",
-    }
+    for audio in media.audios:
+
+        codec = (
+            audio.codec or ""
+        ).lower()
+
+        if codec not in MP4_AUDIO_CODECS:
+            return False
+
+    return True
+
+
+def mp4_can_contain_subtitles(
+    media: MediaInfo,
+) -> bool:
+    """
+    Because subtitles are copied exactly, only subtitle
+    codecs that MP4 can safely carry should result in MP4.
+    """
 
     for subtitle in media.subtitles:
 
@@ -96,11 +94,32 @@ def choose_output_extension(
             subtitle.codec or ""
         ).lower()
 
-        if codec in incompatible_subtitles:
-            return ".mkv"
+        if codec not in MP4_SUBTITLE_CODECS:
+            return False
 
-    # Multiple audio tracks are supported by MP4,
-    # so they don't automatically require MKV.
+    return True
+
+
+def choose_output_extension(
+    media: MediaInfo,
+) -> str:
+    """
+    Automatically select the safest container.
+
+    MP4:
+        Only when the copied audio/subtitle streams
+        are compatible.
+
+    MKV:
+        Used when preserving the original streams
+        requires a more flexible container.
+    """
+
+    if not mp4_can_contain_audio(media):
+        return ".mkv"
+
+    if not mp4_can_contain_subtitles(media):
+        return ".mkv"
 
     return ".mp4"
 
@@ -110,9 +129,7 @@ def build_output_path(
     media: MediaInfo,
 ) -> str:
 
-    source = Path(
-        input_file
-    )
+    source = Path(input_file)
 
     extension = choose_output_extension(
         media
@@ -139,18 +156,19 @@ def format_duration(
         seconds % 3600
     ) // 60
 
-    secs = seconds % 60
+    seconds %= 60
 
     if hours:
+
         return (
             f"{hours:02d}:"
             f"{minutes:02d}:"
-            f"{secs:02d}"
+            f"{seconds:02d}"
         )
 
     return (
         f"{minutes:02d}:"
-        f"{secs:02d}"
+        f"{seconds:02d}"
     )
 
 
@@ -189,8 +207,8 @@ def make_progress_bar(
     )
 
     return (
-        "█" * filled
-        + "░" * (width - filled)
+        "■" * filled
+        + "□" * (width - filled)
     )
 
 
