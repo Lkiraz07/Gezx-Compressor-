@@ -1,0 +1,21 @@
+services:
+  - type: worker
+    name: Gezx-compressor
+    runtime: docker
+
+    dockerfilePath: ./Dockerfile
+
+    autoDeploy: true
+
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+
+      - key: API_ID
+        sync: false
+
+      - key: API_HASH
+        sync: false
+
+      - key: WORK_DIR
+        value: /tmp/fast-video-compressor
