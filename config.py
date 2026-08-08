@@ -1,23 +1,76 @@
 import os
+from pathlib import Path
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-API_ID = int(os.environ["API_ID"])
-API_HASH = os.environ["API_HASH"]
 
-# Maximum input size: 2 GB
-MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024
+# ============================================================
+# Telegram
+# ============================================================
 
-# Working directory
+BOT_TOKEN = os.getenv(
+    "BOT_TOKEN",
+    "",
+).strip()
+
+API_ID_RAW = os.getenv(
+    "API_ID",
+    "",
+).strip()
+
+API_HASH = os.getenv(
+    "API_HASH",
+    "",
+).strip()
+
+
+try:
+    API_ID = int(API_ID_RAW)
+except ValueError:
+    API_ID = 0
+
+
+# ============================================================
+# Storage
+# ============================================================
+
 WORK_DIR = os.getenv(
     "WORK_DIR",
-    "/tmp/fast-video-compressor"
+    "/tmp/fast-video-compressor",
+).strip()
+
+Path(WORK_DIR).mkdir(
+    parents=True,
+    exist_ok=True,
 )
 
-# Adaptive compression settings
-MIN_VIDEO_BITRATE_KBPS = 250
-MAX_VIDEO_BITRATE_KBPS = 12000
 
-# Quality targets
-BALANCED_CRF = 24
-MAX_COMPRESSION_CRF = 30
-HIGH_QUALITY_CRF = 20
+# ============================================================
+# Limits
+# ============================================================
+
+# 2 GiB input limit.
+MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024
+
+
+# ============================================================
+# Validation
+# ============================================================
+
+def validate_config() -> None:
+
+    missing = []
+
+    if not BOT_TOKEN:
+        missing.append("BOT_TOKEN")
+
+    if API_ID <= 0:
+        missing.append("API_ID")
+
+    if not API_HASH:
+        missing.append("API_HASH")
+
+    if missing:
+
+        raise RuntimeError(
+            "Missing required environment variables: "
+            + ", ".join(missing)
+                       )
