@@ -1,16 +1,25 @@
-import os
+hereimport os
 from pathlib import Path
 
 
 # ============================================================
-# Telegram Configuration
+# TELEGRAM
 # ============================================================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+BOT_TOKEN = os.getenv(
+    "BOT_TOKEN",
+    ""
+).strip()
 
-API_ID_RAW = os.getenv("API_ID", "").strip()
+API_ID_RAW = os.getenv(
+    "API_ID",
+    ""
+).strip()
 
-API_HASH = os.getenv("API_HASH", "").strip()
+API_HASH = os.getenv(
+    "API_HASH",
+    ""
+).strip()
 
 
 try:
@@ -20,45 +29,79 @@ except (TypeError, ValueError):
 
 
 # ============================================================
-# Working Directory
+# RENDER / STORAGE
 # ============================================================
 
+# Render provides PORT automatically for Web Services.
+PORT = int(
+    os.getenv(
+        "PORT",
+        "10000"
+    )
+)
+
+# Temporary working directory.
 WORK_DIR = os.getenv(
     "WORK_DIR",
-    "/tmp/fast-video-compressor",
+    "/tmp/fast-video-compressor"
 ).strip()
 
 Path(WORK_DIR).mkdir(
     parents=True,
-    exist_ok=True,
+    exist_ok=True
 )
 
 
 # ============================================================
-# Telegram File Limits
+# TELEGRAM FILE LIMITS
 # ============================================================
 
-# Pyrogram uses Telegram's MTProto API.
-# Pyrogram documents a 2000 MiB per-file limit for
-# MTProto uploads/downloads. :contentReference[oaicite:0]{index=0}
+# 2000 MiB.
+#
+# This is the maximum size we allow the bot to accept.
+# The actual available processing capacity on Render Free
+# can be lower because of its resource limitations.
 
-MAX_FILE_SIZE = 2000 * 1024 * 1024
+MAX_FILE_SIZE = (
+    2000 * 1024 * 1024
+)
 
-MAX_OUTPUT_SIZE = 2000 * 1024 * 1024
+MAX_OUTPUT_SIZE = (
+    2000 * 1024 * 1024
+)
 
 
 # ============================================================
-# Compression Limits
+# JOB SETTINGS
 # ============================================================
 
-# Prevent a single user from accidentally creating
-# multiple simultaneous compression jobs.
-
+# One compression job per user at a time.
 MAX_CONCURRENT_JOBS_PER_USER = 1
 
 
 # ============================================================
-# Validation
+# MEDIA SETTINGS
+# ============================================================
+
+# Video extensions accepted by the bot.
+VIDEO_EXTENSIONS = {
+    ".mp4",
+    ".mkv",
+    ".avi",
+    ".mov",
+    ".webm",
+    ".m4v",
+    ".ts",
+    ".mts",
+    ".m2ts",
+    ".flv",
+    ".wmv",
+    ".3gp",
+}
+
+
+# ============================================================
+# CONFIGURATION VALIDATION
 # ============================================================
 
 def validate_config() -> None:
@@ -66,13 +109,19 @@ def validate_config() -> None:
     missing = []
 
     if not BOT_TOKEN:
-        missing.append("BOT_TOKEN")
+        missing.append(
+            "BOT_TOKEN"
+        )
 
     if API_ID <= 0:
-        missing.append("API_ID")
+        missing.append(
+            "API_ID"
+        )
 
     if not API_HASH:
-        missing.append("API_HASH")
+        missing.append(
+            "API_HASH"
+        )
 
     if missing:
 
@@ -83,16 +132,29 @@ def validate_config() -> None:
 
 
 # ============================================================
-# Startup Information
+# CONFIG SUMMARY
 # ============================================================
 
 def config_summary() -> str:
 
+    max_input_mib = (
+        MAX_FILE_SIZE
+        / 1024
+        / 1024
+    )
+
+    max_output_mib = (
+        MAX_OUTPUT_SIZE
+        / 1024
+        / 1024
+    )
+
     return (
-        "Configuration loaded\n"
+        "Fast Video Compressor configuration\n"
+        f"Port: {PORT}\n"
         f"Work directory: {WORK_DIR}\n"
-        f"Maximum input: "
-        f"{MAX_FILE_SIZE / 1024 / 1024:.0f} MiB\n"
-        f"Maximum output: "
-        f"{MAX_OUTPUT_SIZE / 1024 / 1024:.0f} MiB"
+        f"Maximum input: {max_input_mib:.0f} MiB\n"
+        f"Maximum output: {max_output_mib:.0f} MiB\n"
+        f"Max jobs per user: "
+        f"{MAX_CONCURRENT_JOBS_PER_USER}"
     )
