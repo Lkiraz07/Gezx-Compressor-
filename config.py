@@ -1,14 +1,14 @@
 import os
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
 
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN is not set")
+# Compression defaults
+DEFAULT_TARGET_MB = int(os.getenv("DEFAULT_TARGET_MB", "130"))
 
-if not API_ID:
-    raise ValueError("API_ID is not set")
+# Temporary working directory
+DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "/tmp/compressor")
 
-if not API_HASH:
-    raise ValueError("API_HASH is not set")
+# Maximum input size we allow the bot to attempt
+MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
