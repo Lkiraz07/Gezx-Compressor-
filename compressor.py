@@ -1,96 +1,156 @@
 import asyncio
-import json
 import os
 import re
 from typing import Callable, Optional
 
-
-async def run_command(command):
-
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-
-    stdout, stderr = await process.communicate()
-
-    if process.returncode != 0:
-        error = stderr.decode(
-            errors="replace"
-        )
-
-        raise RuntimeError(error)
-
-    return stdout.decode(
-        errors="replace"
-    )
+from media import MediaInfo, choose_video_stream
 
 
-async def get_media_info(input_file: str):
+class CompressionResult:
+    def __init__(
+        self,
+        output_file: str,
+        original_size: int,
+        output_size: int,
+        video_bitrate: int,
+        audio_bitrate: int,
+        crf: int,
+    ):
+        self.output_file = output_file
+        self.original_size = original_size
+        self.output_size = output_size
+        self.video_bitrate = video_bitrate
+        self.audio_bitrate = audio_bitrate
+        self.crf = crf
 
-    command = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-show_streams",
-        "-show_format",
-        "-of",
-        "json",
-        input_file,
-    ]
 
-    output = await run_command(command)
-
-    return json.loads(output)
-
-
-def calculate_bitrates(
-    duration: float,
-    target_size_mb: int,
-    audio_bitrate_kbps: int = 128,
-):
-
-    target_bits = (
-        target_size_mb
-        * 1024
-        * 1024
-        * 8
-    )
-
-    audio_bits = (
-        audio_bitrate_kbps
-        * 1000
-        * duration
-    )
-
-    # Reserve space for container overhead.
-    available_video_bits = (
-        target_bits
-        * 0.94
-        - audio_bits
-    )
-
-    if available_video_bits <= 0:
-        raise RuntimeError(
-            "Target size is too small for this video's duration."
-        )
-
-    video_bitrate = (
-        available_video_bits
-        / duration
-    )
+def clamp(
+    value: float,
+    minimum: float,
+    maximum: float,
+) -> float:
 
     return max(
-        int(video_bitrate / 1000),
-        100,
+        minimum,
+        min(value, maximum),
     )
 
 
-def parse_ffmpeg_time(value: str) -> float:
+def calculate_audio_bitrate(
+    media: MediaInfo,
+) -> int:
+
+    count = len(media.audios)
+
+    if count == 0:
+        return 0
+
+    # Keep multiple tracks, but don't allow
+    # audio to consume the entire output.
+    if count == 1:
+        return 128
+
+    if count == 2:
+        return 96
+
+    if count <= 4:
+        return 80
+
+    return 64
+
+
+def calculate_compression_profile(
+    media: MediaInfo,
+):
+    """
+    Automatically chooses a sensible compression
+    profile based on the source media.
+
+    There is intentionally NO fixed output size.
+    """
+
+    video = choose_video_stream(media)
+
+    width = video.width
+    height = video.height
+    fps = video.fps or 30.0
+
+    source_bitrate = (
+        video.bitrate
+        or media.bitrate
+        or 0
+    )
+
+    # Base CRF.
+    crf = 24
+
+    # Very high resolution:
+    # allow stronger compression.
+    if height >= 2160:
+        crf = 27
+
+    elif height >= 1440:
+        crf = 26
+
+    elif height >= 1080:
+        crf = 24
+
+    elif height >= 720:
+        crf = 23
+
+    else:
+        crf = 22
+
+    # Extremely high source bitrate means
+    # there is usually more room to reduce size.
+    if source_bitrate:
+
+        if source_bitrate > 20_000_000:
+            crf += 2
+
+        elif source_bitrate > 12_000_000:
+            crf += 1
+
+    # Very low source bitrate:
+    # don't compress too aggressively.
+    if source_bitrate:
+
+        if source_bitrate < 1_000_000:
+            crf -= 2
+
+        elif source_bitrate < 2_000_000:
+            crf -= 1
+
+    # High FPS needs more bitrate.
+    if fps >= 60:
+        crf -= 1
+
+    # Clamp CRF to a reasonable range.
+    crf = int(
+        clamp(
+            crf,
+            20,
+            30,
+        )
+    )
+
+    # Audio bitrate.
+    audio_bitrate = calculate_audio_bitrate(
+        media
+    )
+
+    return {
+        "crf": crf,
+        "audio_bitrate": audio_bitrate,
+    }
+
+
+def parse_ffmpeg_time(
+    value: str,
+) -> float:
 
     match = re.search(
-        r"(\d+):(\d+):(\d+(?:\.\d+)?)",
+        r"time=(\d+):(\d+):(\d+(?:\.\d+)?)",
         value,
     )
 
@@ -111,117 +171,74 @@ def parse_ffmpeg_time(value: str) -> float:
 async def compress_video(
     input_file: str,
     output_file: str,
-    target_size_mb: int,
+    media: MediaInfo,
     progress_callback: Optional[
         Callable
     ] = None,
     cancel_callback: Optional[
         Callable
     ] = None,
-):
+) -> CompressionResult:
 
-    info = await get_media_info(
-        input_file
+    profile = calculate_compression_profile(
+        media
     )
 
-    streams = info.get(
-        "streams",
-        [],
-    )
+    crf = profile["crf"]
 
-    format_info = info.get(
-        "format",
-        {},
-    )
-
-    duration = float(
-        format_info.get(
-            "duration",
-            0,
-        )
-        or 0
-    )
-
-    if duration <= 0:
-        raise RuntimeError(
-            "Invalid or unknown video duration."
-        )
-
-    video_streams = [
-        stream
-        for stream in streams
-        if stream.get("codec_type") == "video"
+    audio_bitrate = profile[
+        "audio_bitrate"
     ]
 
-    audio_streams = [
-        stream
-        for stream in streams
-        if stream.get("codec_type") == "audio"
-    ]
-
-    subtitle_streams = [
-        stream
-        for stream in streams
-        if stream.get("codec_type") == "subtitle"
-    ]
-
-    if not video_streams:
-        raise RuntimeError(
-            "No video stream found."
-        )
-
-    # Choose an audio bitrate that gives
-    # reasonable quality without consuming
-    # the entire target size.
-    audio_count = len(audio_streams)
-
-    if audio_count == 0:
-        audio_bitrate = 0
-    elif audio_count == 1:
-        audio_bitrate = 128
-    elif audio_count == 2:
-        audio_bitrate = 96
-    else:
-        audio_bitrate = 80
-
-    total_audio_bitrate = (
-        audio_bitrate * audio_count
+    video = choose_video_stream(
+        media
     )
 
-    video_bitrate = calculate_bitrates(
-        duration=duration,
-        target_size_mb=target_size_mb,
-        audio_bitrate_kbps=total_audio_bitrate,
-    )
+    # -----------------------------------------
+    # Build FFmpeg command
+    # -----------------------------------------
 
     command = [
         "ffmpeg",
+
         "-hide_banner",
+
         "-y",
 
         "-i",
         input_file,
 
-        # Map the first video stream.
+        # Main video stream.
         "-map",
         "0:v:0",
     ]
 
-    # Map every audio stream.
-    if audio_streams:
+    # -----------------------------------------
+    # Audio
+    # -----------------------------------------
+
+    if media.audios:
+
         command += [
             "-map",
             "0:a?",
         ]
 
-    # Map every subtitle stream.
-    if subtitle_streams:
+    # -----------------------------------------
+    # Subtitles
+    # -----------------------------------------
+
+    if media.subtitles:
+
         command += [
             "-map",
             "0:s?",
         ]
 
-    # Video encoding.
+    # -----------------------------------------
+    # Video encoder
+    # -----------------------------------------
+
     command += [
         "-c:v",
         "libx264",
@@ -229,75 +246,117 @@ async def compress_video(
         "-preset",
         "veryfast",
 
-        "-b:v",
-        f"{video_bitrate}k",
+        "-crf",
+        str(crf),
 
-        "-maxrate",
-        f"{int(video_bitrate * 1.15)}k",
-
-        "-bufsize",
-        f"{int(video_bitrate * 2)}k",
-
+        # Good compatibility.
         "-pix_fmt",
         "yuv420p",
+
+        # Prevent unnecessarily huge
+        # bitrate spikes.
+        "-maxrate",
+        "12000k",
+
+        "-bufsize",
+        "24000k",
     ]
 
-    # Audio.
-    if audio_streams:
+    # -----------------------------------------
+    # Audio encoder
+    # -----------------------------------------
+
+    if media.audios:
 
         command += [
             "-c:a",
             "aac",
+
             "-b:a",
             f"{audio_bitrate}k",
+
+            "-ac",
+            "2",
         ]
 
-    # Subtitle handling.
-    if subtitle_streams:
+    # -----------------------------------------
+    # Subtitles
+    # -----------------------------------------
+
+    if media.subtitles:
 
         command += [
             "-c:s",
             "copy",
         ]
 
-    # Metadata.
+    # -----------------------------------------
+    # Metadata + chapters
+    # -----------------------------------------
+
     command += [
         "-map_metadata",
         "0",
 
         "-map_chapters",
         "0",
+    ]
 
+    # -----------------------------------------
+    # MP4 optimization
+    # -----------------------------------------
+
+    command += [
         "-movflags",
         "+faststart",
+    ]
 
+    # -----------------------------------------
+    # Output
+    # -----------------------------------------
+
+    command += [
         output_file,
     ]
 
     process = await asyncio.create_subprocess_exec(
         *command,
+
         stdout=asyncio.subprocess.DEVNULL,
+
         stderr=asyncio.subprocess.PIPE,
     )
 
-    last_progress = 0
+    duration = media.duration
+
+    last_percent = -1
+
+    # -----------------------------------------
+    # Read FFmpeg progress
+    # -----------------------------------------
 
     while True:
 
         if cancel_callback:
+
             cancelled = cancel_callback()
 
             if cancelled:
 
                 try:
                     process.terminate()
+
                 except ProcessLookupError:
                     pass
 
                 await process.wait()
 
-                if os.path.exists(output_file):
-                    os.remove(output_file)
+                if os.path.exists(
+                    output_file
+                ):
+                    os.remove(
+                        output_file
+                    )
 
                 raise asyncio.CancelledError
 
@@ -310,56 +369,102 @@ async def compress_video(
             errors="replace"
         ).strip()
 
-        if "time=" in text:
+        if "time=" not in text:
+            continue
 
-            match = re.search(
-                r"time=(\d+:\d+:\d+(?:\.\d+)?)",
-                text,
+        encoded_time = parse_ffmpeg_time(
+            text
+        )
+
+        if duration > 0:
+
+            percent = (
+                encoded_time
+                / duration
+                * 100
             )
 
-            if match:
+            percent = min(
+                100,
+                max(0, percent),
+            )
 
-                encoded_seconds = parse_ffmpeg_time(
-                    match.group(1)
-                )
+        else:
+            percent = 0
 
-                percent = min(
-                    encoded_seconds
-                    / duration
-                    * 100,
-                    100,
-                )
+        if (
+            progress_callback
+            and int(percent)
+            != last_percent
+        ):
 
-                if (
-                    progress_callback
-                    and percent - last_progress >= 1
-                ):
+            last_percent = int(
+                percent
+            )
 
-                    last_progress = percent
+            await progress_callback(
+                {
+                    "percent": percent,
 
-                    await progress_callback(
-                        {
-                            "percent": percent,
-                            "encoded_seconds": encoded_seconds,
-                            "duration": duration,
-                        }
-                    )
+                    "encoded_seconds":
+                        encoded_time,
+
+                    "duration":
+                        duration,
+
+                    "crf":
+                        crf,
+
+                    "audio_bitrate":
+                        audio_bitrate,
+                }
+            )
 
     return_code = await process.wait()
 
     if return_code != 0:
 
-        if os.path.exists(output_file):
-            os.remove(output_file)
+        if os.path.exists(
+            output_file
+        ):
+            os.remove(
+                output_file
+            )
 
         raise RuntimeError(
-            "FFmpeg compression failed."
+            "FFmpeg failed while "
+            "compressing the video."
         )
 
-    if not os.path.exists(output_file):
+    if not os.path.exists(
+        output_file
+    ):
 
         raise RuntimeError(
-            "FFmpeg finished without creating output."
+            "FFmpeg completed but "
+            "no output file was created."
         )
 
-    return output_file
+    original_size = os.path.getsize(
+        input_file
+    )
+
+    output_size = os.path.getsize(
+        output_file
+    )
+
+    return CompressionResult(
+        output_file=output_file,
+
+        original_size=original_size,
+
+        output_size=output_size,
+
+        video_bitrate=(
+            video.bitrate or 0
+        ),
+
+        audio_bitrate=audio_bitrate,
+
+        crf=crf,
+    )
