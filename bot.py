@@ -1,5 +1,4 @@
 import asyncio
-import os
 import shutil
 import time
 from pathlib import Path
@@ -29,7 +28,7 @@ from utils import (
 
 
 # ============================================================
-# Telegram client
+# Telegram Client
 # ============================================================
 
 app = Client(
@@ -41,15 +40,13 @@ app = Client(
 
 
 # ============================================================
-# Job management
+# Active jobs
 # ============================================================
 
 active_jobs = {}
 
 
-def user_id_from_message(
-    message: Message,
-) -> int:
+def get_user_id(message: Message) -> int:
 
     if message.from_user:
         return message.from_user.id
@@ -62,16 +59,16 @@ def user_id_from_message(
 # ============================================================
 
 @app.on_message(filters.command("start"))
-async def start_handler(
+async def start_command(
     client: Client,
     message: Message,
 ):
 
     await message.reply_text(
         "Fast Video Compressor\n\n"
-        "Send me a video or video file.\n\n"
-        "The compressor automatically chooses "
-        "compression strength based on the source.\n\n"
+        "Send a video or video file and I will "
+        "compress the video while preserving "
+        "audio tracks and subtitles whenever possible.\n\n"
         "Commands:\n"
         "/cancel - cancel your current job"
     )
@@ -82,20 +79,16 @@ async def start_handler(
 # ============================================================
 
 @app.on_message(filters.command("cancel"))
-async def cancel_handler(
+async def cancel_command(
     client: Client,
     message: Message,
 ):
 
-    user_id = user_id_from_message(
-        message
-    )
+    user_id = get_user_id(message)
 
-    job = active_jobs.get(
-        user_id
-    )
+    job = active_jobs.get(user_id)
 
-    if not job:
+    if job is None:
 
         await message.reply_text(
             "You don't have an active job."
@@ -111,7 +104,7 @@ async def cancel_handler(
 
 
 # ============================================================
-# File information
+# Get file size
 # ============================================================
 
 def get_file_size(
@@ -135,27 +128,29 @@ def get_file_size(
     return 0
 
 
-def get_original_filename(
+# ============================================================
+# Get filename
+# ============================================================
+
+def get_filename(
     message: Message,
 ) -> str:
 
-    if (
-        message.document
-        and message.document.file_name
-    ):
+    if message.document:
 
-        return safe_filename(
-            message.document.file_name
-        )
+        if message.document.file_name:
 
-    if (
-        message.video
-        and message.video.file_name
-    ):
+            return safe_filename(
+                message.document.file_name
+            )
 
-        return safe_filename(
-            message.video.file_name
-        )
+    if message.video:
+
+        if message.video.file_name:
+
+            return safe_filename(
+                message.video.file_name
+            )
 
     return (
         f"video_{message.id}.mp4"
@@ -163,7 +158,7 @@ def get_original_filename(
 
 
 # ============================================================
-# Download progress callback
+# Download callback
 # ============================================================
 
 async def download_progress(
@@ -179,7 +174,7 @@ async def download_progress(
 
 
 # ============================================================
-# Upload progress callback
+# Upload callback
 # ============================================================
 
 async def upload_progress(
@@ -195,7 +190,7 @@ async def upload_progress(
 
 
 # ============================================================
-# Main video handler
+# Main handler
 # ============================================================
 
 @app.on_message(
@@ -207,12 +202,10 @@ async def video_handler(
     message: Message,
 ):
 
-    user_id = user_id_from_message(
-        message
-    )
+    user_id = get_user_id(message)
 
     # --------------------------------------------------------
-    # Prevent multiple jobs per user
+    # One job per user
     # --------------------------------------------------------
 
     if user_id in active_jobs:
@@ -230,30 +223,30 @@ async def video_handler(
     if file_size <= 0:
 
         await message.reply_text(
-            "Unable to determine file size."
+            "I couldn't determine the file size."
         )
 
         return
 
     # --------------------------------------------------------
-    # 2 GB input safeguard
+    # Input limit
     # --------------------------------------------------------
 
     if file_size > MAX_FILE_SIZE:
 
         await message.reply_text(
-            "This file is larger than "
-            "the current 2 GB input limit."
+            "This file is larger than the "
+            "current 2 GB input limit."
         )
 
         return
 
-    filename = get_original_filename(
+    filename = get_filename(
         message
     )
 
     # --------------------------------------------------------
-    # Job directory
+    # Create job directory
     # --------------------------------------------------------
 
     job_dir = (
@@ -278,10 +271,10 @@ async def video_handler(
     }
 
     status = await message.reply_text(
-        "Preparing your video..."
+        "Preparing..."
     )
 
-    started_at = time.monotonic()
+    started = time.monotonic()
 
     try:
 
@@ -295,7 +288,7 @@ async def video_handler(
             total=file_size,
         )
 
-        async def download_cb(
+        async def download_callback(
             current,
             total,
         ):
@@ -311,12 +304,33 @@ async def video_handler(
             file_name=str(
                 input_file
             ),
-            progress=download_cb,
+            progress=download_callback,
         )
+
+        # Check cancellation after download.
 
         if active_jobs[user_id]["cancel"]:
 
             raise asyncio.CancelledError
+
+        # Verify download.
+
+        if not input_file.is_file():
+
+            raise RuntimeError(
+                "Download completed but "
+                "the file was not found."
+            )
+
+        downloaded_size = (
+            input_file.stat().st_size
+        )
+
+        if downloaded_size <= 0:
+
+            raise RuntimeError(
+                "Downloaded file is empty."
+            )
 
         # ====================================================
         # ANALYZE
@@ -330,6 +344,8 @@ async def video_handler(
             str(input_file)
         )
 
+        # Show information.
+
         summary = media_summary(
             media
         )
@@ -337,7 +353,7 @@ async def video_handler(
         await status.edit_text(
             "Media detected\n\n"
             f"{summary}\n\n"
-            "Preparing adaptive compression..."
+            "Preparing compression..."
         )
 
         # ====================================================
@@ -358,17 +374,22 @@ async def video_handler(
             operation="Compressing",
         )
 
-        compression_cb = (
+        compression_callback = (
             compression_progress_callback(
                 compression_tracker
             )
         )
 
-        async def cancel_cb():
+        async def cancel_callback():
 
-            return active_jobs[
+            job = active_jobs.get(
                 user_id
-            ]["cancel"]
+            )
+
+            if job is None:
+                return True
+
+            return job["cancel"]
 
         result = await compress_video(
             input_file=str(
@@ -379,17 +400,46 @@ async def video_handler(
 
             media=media,
 
-            progress_callback=compression_cb,
+            progress_callback=(
+                compression_callback
+            ),
 
-            cancel_callback=cancel_cb,
+            cancel_callback=(
+                cancel_callback
+            ),
         )
+
+        # ====================================================
+        # VERIFY CANCELLATION
+        # ====================================================
 
         if active_jobs[user_id]["cancel"]:
 
             raise asyncio.CancelledError
 
         # ====================================================
-        # RESULT
+        # VERIFY OUTPUT
+        # ====================================================
+
+        output_path = Path(
+            result.output_file
+        )
+
+        if not output_path.is_file():
+
+            raise RuntimeError(
+                "Compression finished but "
+                "the output file does not exist."
+            )
+
+        if output_path.stat().st_size <= 0:
+
+            raise RuntimeError(
+                "The compressed file is empty."
+            )
+
+        # ====================================================
+        # SIZE CALCULATION
         # ====================================================
 
         original_size = (
@@ -400,7 +450,7 @@ async def video_handler(
             result.output_size
         )
 
-        saved = (
+        saved_bytes = (
             original_size
             - compressed_size
         )
@@ -408,31 +458,23 @@ async def video_handler(
         if original_size > 0:
 
             reduction = (
-                saved
+                saved_bytes
                 / original_size
                 * 100
             )
 
         else:
 
-            reduction = 0
+            reduction = 0.0
 
-        elapsed = (
-            time.monotonic()
-            - started_at
-        )
+        # If compression somehow made the file larger,
+        # don't report negative "saved" size.
 
-        await status.edit_text(
-            "Compression complete.\n\n"
-            f"Original: "
-            f"{human_size(original_size)}\n"
-            f"Compressed: "
-            f"{human_size(compressed_size)}\n"
-            f"Saved: "
-            f"{human_size(max(saved, 0))}\n"
-            f"Reduction: "
-            f"{reduction:.1f}%\n\n"
-            f"CRF: {result.crf}"
+        saved_text = human_size(
+            max(
+                0,
+                saved_bytes,
+            )
         )
 
         # ====================================================
@@ -445,7 +487,7 @@ async def video_handler(
             total=compressed_size,
         )
 
-        async def upload_cb(
+        async def upload_callback(
             current,
             total,
         ):
@@ -456,49 +498,53 @@ async def video_handler(
                 upload_tracker,
             )
 
+        extension = (
+            output_path.suffix.lower()
+        )
+
+        container_text = (
+            "MKV"
+            if extension == ".mkv"
+            else "MP4"
+        )
+
         caption = (
             "Compressed video\n\n"
             f"Original: "
             f"{human_size(original_size)}\n"
             f"Compressed: "
             f"{human_size(compressed_size)}\n"
-            f"Saved: "
-            f"{human_size(max(saved, 0))}\n"
-            f"Reduction: "
-            f"{reduction:.1f}%"
+            f"Saved: {saved_text}\n"
+            f"Reduction: {reduction:.1f}%\n"
+            f"Container: {container_text}\n"
+            f"Video CRF: {result.crf}"
         )
-
-        extension = (
-            Path(output_file)
-            .suffix
-            .lower()
-        )
-
-        # ----------------------------------------------------
-        # Send as document to preserve container/streams.
-        # ----------------------------------------------------
 
         await client.send_document(
             chat_id=message.chat.id,
-            document=output_file,
+            document=str(output_path),
             caption=caption,
-            progress=upload_cb,
+            progress=upload_callback,
         )
 
         # ====================================================
-        # FINISH
+        # COMPLETE
         # ====================================================
 
+        elapsed = (
+            time.monotonic()
+            - started
+        )
+
         await status.edit_text(
-            "Done.\n\n"
+            "Completed.\n\n"
             f"Original: "
             f"{human_size(original_size)}\n"
             f"Compressed: "
             f"{human_size(compressed_size)}\n"
-            f"Saved: "
-            f"{human_size(max(saved, 0))}\n"
-            f"Time: "
-            f"{int(elapsed)} sec"
+            f"Saved: {saved_text}\n"
+            f"Reduction: {reduction:.1f}%\n"
+            f"Time: {int(elapsed)} sec"
         )
 
     # ========================================================
@@ -523,7 +569,7 @@ async def video_handler(
     except Exception as error:
 
         print(
-            "Compression error:",
+            "JOB ERROR:",
             repr(error),
         )
 
@@ -555,16 +601,22 @@ async def video_handler(
                 ignore_errors=True,
             )
 
-        except Exception:
-            pass
+        except Exception as cleanup_error:
+
+            print(
+                "Cleanup error:",
+                repr(cleanup_error),
+            )
 
 
 # ============================================================
-# Start
+# Start bot
 # ============================================================
 
-print(
-    "Fast Video Compressor is starting..."
-)
+if __name__ == "__main__":
 
-app.run()
+    print(
+        "Fast Video Compressor is starting..."
+    )
+
+    app.run()
