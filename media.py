@@ -1,140 +1,78 @@
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 
 @dataclass
 class VideoStream:
     index: int
-    codec: str
-    width: int
-    height: int
-    fps: float
-    bitrate: Optional[int]
-    duration: float
-    pixel_format: Optional[str]
+    codec: str = ""
+    width: int = 0
+    height: int = 0
+    fps: float = 0.0
+    bitrate: int = 0
+    language: str = ""
+    title: str = ""
 
 
 @dataclass
 class AudioStream:
     index: int
-    codec: str
-    language: Optional[str]
-    title: Optional[str]
-    channels: int
-    sample_rate: int
-    bitrate: Optional[int]
+    codec: str = ""
+    bitrate: int = 0
+    channels: int = 0
+    sample_rate: int = 0
+    language: str = ""
+    title: str = ""
 
 
 @dataclass
 class SubtitleStream:
     index: int
-    codec: str
-    language: Optional[str]
-    title: Optional[str]
+    codec: str = ""
+    language: str = ""
+    title: str = ""
 
 
 @dataclass
 class MediaInfo:
-    filename: str
-    format_name: str
-    duration: float
-    size: int
-    bitrate: Optional[int]
+    duration: float = 0.0
+    bitrate: int = 0
+    format_name: str = ""
 
-    videos: list[VideoStream]
-    audios: list[AudioStream]
-    subtitles: list[SubtitleStream]
-
-    has_multiple_audio: bool
-    has_subtitles: bool
-
-
-async def _run_ffprobe(
-    input_file: str,
-) -> dict:
-
-    command = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-show_streams",
-        "-show_format",
-        "-of",
-        "json",
-        input_file,
-    ]
-
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    videos: list[VideoStream] = field(
+        default_factory=list
     )
 
-    stdout, stderr = await process.communicate()
+    audios: list[AudioStream] = field(
+        default_factory=list
+    )
 
-    if process.returncode != 0:
-        error = stderr.decode(
-            errors="replace"
-        )
-
-        raise RuntimeError(
-            f"FFprobe failed: {error}"
-        )
-
-    try:
-        return json.loads(
-            stdout.decode(
-                errors="replace"
-            )
-        )
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            "FFprobe returned invalid data."
-        ) from exc
+    subtitles: list[SubtitleStream] = field(
+        default_factory=list
+    )
 
 
-def _safe_int(
-    value,
-    default=0,
-) -> int:
+def parse_int(value) -> int:
 
     try:
-        return int(value)
-    except (
-        TypeError,
-        ValueError,
-    ):
-        return default
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
 
 
-def _safe_float(
-    value,
-    default=0.0,
-) -> float:
-
-    try:
-        return float(value)
-    except (
-        TypeError,
-        ValueError,
-    ):
-        return default
-
-
-def _parse_fraction(
-    value: Optional[str],
-) -> float:
+def parse_fps(value: str) -> float:
 
     if not value:
         return 0.0
 
     try:
+
         if "/" in value:
-            numerator, denominator = value.split(
-                "/",
-                1,
+
+            numerator, denominator = (
+                value.split("/", 1)
             )
 
             numerator = float(numerator)
@@ -147,64 +85,74 @@ def _parse_fraction(
 
         return float(value)
 
-    except (
-        TypeError,
-        ValueError,
-        ZeroDivisionError,
-    ):
+    except (TypeError, ValueError):
         return 0.0
 
 
-def _stream_bitrate(
-    stream: dict,
-) -> Optional[int]:
+async def run_ffprobe(
+    input_file: str,
+) -> dict:
 
-    value = stream.get(
-        "bit_rate"
+    command = [
+        "ffprobe",
+
+        "-v",
+        "error",
+
+        "-print_format",
+        "json",
+
+        "-show_format",
+
+        "-show_streams",
+
+        input_file,
+    ]
+
+    process = await asyncio.create_subprocess_exec(
+        *command,
+
+        stdout=asyncio.subprocess.PIPE,
+
+        stderr=asyncio.subprocess.PIPE,
     )
 
-    if value:
-        try:
-            return int(value)
-        except ValueError:
-            pass
+    stdout, stderr = await process.communicate()
 
-    return None
+    if process.returncode != 0:
 
+        error = stderr.decode(
+            errors="replace"
+        ).strip()
 
-def _language(
-    stream: dict,
-) -> Optional[str]:
+        raise RuntimeError(
+            "FFprobe failed: "
+            + (
+                error
+                or "unknown error"
+            )
+        )
 
-    tags = stream.get(
-        "tags",
-        {},
-    )
+    try:
 
-    return tags.get(
-        "language"
-    )
+        return json.loads(
+            stdout.decode(
+                errors="replace"
+            )
+        )
 
+    except json.JSONDecodeError as error:
 
-def _title(
-    stream: dict,
-) -> Optional[str]:
-
-    tags = stream.get(
-        "tags",
-        {},
-    )
-
-    return tags.get(
-        "title"
-    )
+        raise RuntimeError(
+            "FFprobe returned invalid JSON."
+        ) from error
 
 
 async def analyze_media(
     input_file: str,
 ) -> MediaInfo:
 
-    data = await _run_ffprobe(
+    data = await run_ffprobe(
         input_file
     )
 
@@ -213,189 +161,215 @@ async def analyze_media(
         {},
     )
 
+    media = MediaInfo(
+        duration=float(
+            format_data.get(
+                "duration",
+                0,
+            )
+            or 0
+        ),
+
+        bitrate=parse_int(
+            format_data.get(
+                "bit_rate",
+                0,
+            )
+        ),
+
+        format_name=(
+            format_data.get(
+                "format_name",
+                "",
+            )
+            or ""
+        ),
+    )
+
     streams = data.get(
         "streams",
         [],
     )
 
-    videos = []
-    audios = []
-    subtitles = []
-
     for stream in streams:
 
         codec_type = stream.get(
-            "codec_type"
+            "codec_type",
+            "",
         )
+
+        tags = stream.get(
+            "tags",
+            {}
+        ) or {}
+
+        language = (
+            tags.get(
+                "language",
+                "",
+            )
+            or ""
+        )
+
+        title = (
+            tags.get(
+                "title",
+                "",
+            )
+            or ""
+        )
+
+        index = parse_int(
+            stream.get(
+                "index",
+                0,
+            )
+        )
+
+        codec = (
+            stream.get(
+                "codec_name",
+                "",
+            )
+            or ""
+        ).lower()
+
+        # ==================================================
+        # VIDEO
+        # ==================================================
 
         if codec_type == "video":
 
-            videos.append(
-                VideoStream(
-                    index=_safe_int(
-                        stream.get("index")
-                    ),
-                    codec=stream.get(
-                        "codec_name",
-                        "unknown",
-                    ),
-                    width=_safe_int(
-                        stream.get("width")
-                    ),
-                    height=_safe_int(
-                        stream.get("height")
-                    ),
-                    fps=_parse_fraction(
-                        stream.get(
-                            "avg_frame_rate"
-                        )
-                    ),
-                    bitrate=_stream_bitrate(
-                        stream
-                    ),
-                    duration=_safe_float(
-                        stream.get(
-                            "duration"
-                        )
-                    ),
-                    pixel_format=stream.get(
-                        "pix_fmt"
-                    ),
+            width = parse_int(
+                stream.get(
+                    "width",
+                    0,
                 )
             )
+
+            height = parse_int(
+                stream.get(
+                    "height",
+                    0,
+                )
+            )
+
+            fps = parse_fps(
+                stream.get(
+                    "avg_frame_rate",
+                    "",
+                )
+            )
+
+            if fps <= 0:
+
+                fps = parse_fps(
+                    stream.get(
+                        "r_frame_rate",
+                        "",
+                    )
+                )
+
+            video = VideoStream(
+                index=index,
+                codec=codec,
+                width=width,
+                height=height,
+                fps=fps,
+                bitrate=parse_int(
+                    stream.get(
+                        "bit_rate",
+                        0,
+                    )
+                ),
+                language=language,
+                title=title,
+            )
+
+            media.videos.append(
+                video
+            )
+
+        # ==================================================
+        # AUDIO
+        # ==================================================
 
         elif codec_type == "audio":
 
-            audios.append(
-                AudioStream(
-                    index=_safe_int(
-                        stream.get("index")
-                    ),
-                    codec=stream.get(
-                        "codec_name",
-                        "unknown",
-                    ),
-                    language=_language(
-                        stream
-                    ),
-                    title=_title(
-                        stream
-                    ),
-                    channels=_safe_int(
-                        stream.get(
-                            "channels"
-                        )
-                    ),
-                    sample_rate=_safe_int(
-                        stream.get(
-                            "sample_rate"
-                        )
-                    ),
-                    bitrate=_stream_bitrate(
-                        stream
-                    ),
-                )
+            audio = AudioStream(
+                index=index,
+                codec=codec,
+                bitrate=parse_int(
+                    stream.get(
+                        "bit_rate",
+                        0,
+                    )
+                ),
+                channels=parse_int(
+                    stream.get(
+                        "channels",
+                        0,
+                    )
+                ),
+                sample_rate=parse_int(
+                    stream.get(
+                        "sample_rate",
+                        0,
+                    )
+                ),
+                language=language,
+                title=title,
             )
+
+            media.audios.append(
+                audio
+            )
+
+        # ==================================================
+        # SUBTITLES
+        # ==================================================
 
         elif codec_type == "subtitle":
 
-            subtitles.append(
-                SubtitleStream(
-                    index=_safe_int(
-                        stream.get("index")
-                    ),
-                    codec=stream.get(
-                        "codec_name",
-                        "unknown",
-                    ),
-                    language=_language(
-                        stream
-                    ),
-                    title=_title(
-                        stream
-                    ),
-                )
+            subtitle = SubtitleStream(
+                index=index,
+                codec=codec,
+                language=language,
+                title=title,
             )
 
-    if not videos:
+            media.subtitles.append(
+                subtitle
+            )
+
+    if not media.videos:
 
         raise RuntimeError(
-            "The file does not contain a video stream."
+            "No video stream was found."
         )
 
-    duration = _safe_float(
-        format_data.get(
-            "duration"
-        )
-    )
-
-    size = _safe_int(
-        format_data.get(
-            "size"
-        )
-    )
-
-    bitrate = None
-
-    if format_data.get("bit_rate"):
-
-        bitrate = _safe_int(
-            format_data.get(
-                "bit_rate"
-            )
-        )
-
-    filename = input_file.rsplit(
-        "/",
-        1,
-    )[-1]
-
-    return MediaInfo(
-        filename=filename,
-        format_name=format_data.get(
-            "format_name",
-            "unknown",
-        ),
-        duration=duration,
-        size=size,
-        bitrate=bitrate,
-        videos=videos,
-        audios=audios,
-        subtitles=subtitles,
-        has_multiple_audio=len(audios) > 1,
-        has_subtitles=bool(subtitles),
-    )
+    return media
 
 
 def choose_video_stream(
     media: MediaInfo,
 ) -> VideoStream:
 
-    # First video stream is the main video.
-    return media.videos[0]
+    if not media.videos:
 
+        raise RuntimeError(
+            "No video stream available."
+        )
 
-def resolution_label(
-    width: int,
-    height: int,
-) -> str:
-
-    if height >= 2160:
-        return "4K"
-
-    if height >= 1440:
-        return "1440p"
-
-    if height >= 1080:
-        return "1080p"
-
-    if height >= 720:
-        return "720p"
-
-    if height >= 480:
-        return "480p"
-
-    return f"{height}p"
+    # Prefer the highest-resolution video stream.
+    return max(
+        media.videos,
+        key=lambda stream: (
+            stream.width
+            * stream.height,
+            stream.bitrate,
+        ),
+    )
 
 
 def media_summary(
@@ -406,22 +380,40 @@ def media_summary(
         media
     )
 
-    lines = [
-        f"Format: {media.format_name}",
-        (
-            f"Video: {video.width}x"
-            f"{video.height} "
-            f"({resolution_label(video.width, video.height)})"
-        ),
-        f"Codec: {video.codec}",
-        f"FPS: {video.fps:.2f}",
-        f"Audio tracks: {len(media.audios)}",
-        f"Subtitles: {len(media.subtitles)}",
-    ]
+    lines = []
 
-    if media.duration:
+    lines.append(
+        f"Video: "
+        f"{video.width}x{video.height}"
+    )
+
+    if video.fps > 0:
+
         lines.append(
-            f"Duration: {media.duration:.1f}s"
+            f"FPS: {video.fps:.2f}"
+        )
+
+    if video.codec:
+
+        lines.append(
+            f"Video codec: {video.codec}"
+        )
+
+    lines.append(
+        f"Audio tracks: "
+        f"{len(media.audios)}"
+    )
+
+    lines.append(
+        f"Subtitle tracks: "
+        f"{len(media.subtitles)}"
+    )
+
+    if media.format_name:
+
+        lines.append(
+            f"Container: "
+            f"{media.format_name}"
         )
 
     return "\n".join(lines)
