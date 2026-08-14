@@ -1,35 +1,34 @@
 hereimport os
+import sys
 from pathlib import Path
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-API_ID_RAW = os.getenv("API_ID", "").strip()
-API_HASH = os.getenv("API_HASH", "").strip()
+class Config:
+    BOT_TOKEN: str = os.getenv("BOT_TOKEN", "").strip()
+    API_ID: int = int(os.getenv("API_ID", "0"))
+    API_HASH: str = os.getenv("API_HASH", "").strip()
+    
+    # Working Directory Configuration
+    WORK_DIR: Path = Path(os.getenv("WORK_DIR", "/tmp/fast-video-compressor"))
+    
+    # Render Specific Port
+    PORT: int = int(os.getenv("PORT", "8080"))
 
-try:
-    API_ID = int(API_ID_RAW)
-except (TypeError, ValueError):
-    API_ID = 0
+    @classmethod
+    def validate(cls):
+        missing = []
+        if not cls.BOT_TOKEN:
+            missing.append("BOT_TOKEN")
+        if not cls.API_ID:
+            missing.append("API_ID")
+        if not cls.API_HASH:
+            missing.append("API_HASH")
+            
+        if missing:
+            print(f"CRITICAL ERROR: Missing required environment variables: {', '.join(missing)}", file=sys.stderr)
+            sys.exit(1)
+            
+        # Ensure temporary work directory exists
+        cls.WORK_DIR.mkdir(parents=True, exist_ok=True)
 
-PORT = int(os.getenv("PORT", "10000"))
-WORK_DIR = os.getenv(
-    "WORK_DIR", "/tmp/fast-video-compressor"
-).strip()
-Path(WORK_DIR).mkdir(parents=True, exist_ok=True)
-
-MAX_FILE_SIZE = 2000 * 1024 * 1024
-MAX_OUTPUT_SIZE = 2000 * 1024 * 1024
-MAX_CONCURRENT_JOBS_PER_USER = 1
-
-
-def validate_config() -> None:
-    missing = []
-    if not BOT_TOKEN:
-        missing.append("BOT_TOKEN")
-    if API_ID <= 0:
-        missing.append("API_ID")
-    if not API_HASH:
-        missing.append("API_HASH")
-    if missing:
-        raise RuntimeError(
-            "Missing required environment variables: " + ", ".join(missing)
-        )
+# Run validation on import
+Config.validate()
