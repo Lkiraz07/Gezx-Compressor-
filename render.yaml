@@ -1,20 +1,18 @@
 services:
   - type: web
-    name: Gezx-compressor
-    runtime: docker
+    name: Gezx-Compressor
+    env: docker
     plan: free
-
-    dockerfilePath: ./Dockerfile
-
+    region: singapore
+    dockerContext: .
+    dockerfilePath: Dockerfile
+    healthCheckPath: /health
     envVars:
       - key: BOT_TOKEN
         sync: false
-
       - key: API_ID
         sync: false
-
       - key: API_HASH
         sync: false
-
       - key: WORK_DIR
-        value: /tmp/Gezx-compressor
+        value: /tmp/Gezx-Compressor
