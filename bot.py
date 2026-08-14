@@ -17,7 +17,7 @@ from progress import ProgressTracker
 
 @dataclass
 class JobState:
-    cancel_event: asyncio.event
+    cancel_event: asyncio.Event
     task: Optional[asyncio.Task] = None
     input_file: Optional[Path] = None
     output_file: Optional[Path] = None
