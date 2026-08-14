@@ -1,22 +1,23 @@
-FROM python:3.11-slim
+hereFROM python:3.11-slim
 
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
+# Install system dependencies & FFmpeg
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    ffmpeg \
+    catdoc \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# FFmpeg + FFprobe
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
-
+# Copy dependency specifications first to leverage caching
 COPY requirements.txt .
-
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy application source code
 COPY . .
 
-RUN mkdir -p /tmp/fast-video-compressor
+# Expose Render Default Port
+EXPOSE 8080
 
+# Run Bot Application Engine
 CMD ["python", "bot.py"]
