@@ -1,0 +1,13 @@
+Environment secrets
+​.env
+.env.*
+​Python caches & build directories
+​pycache/
+*.py[cod]
+*$py.class
+*.so
+​Pyrogram session stores
+​*.session
+*.session-journal
+​Temporary runtime files
+​/tmp/
