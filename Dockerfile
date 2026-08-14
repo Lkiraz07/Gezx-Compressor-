@@ -1,4 +1,4 @@
-hereFROM python:3.11-slim
+FROM python:3.11-slim
 
 # Install system dependencies & FFmpeg
 RUN apt-get update && \
