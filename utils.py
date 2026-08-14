@@ -1,69 +1,39 @@
-hereimport os
-import re
+hereimport time
+import math
 from pathlib import Path
-from typing import Optional
 
-from media import MediaInfo
+def human_bytes(size: float) -> str:
+    """Convert bytes into human-readable representation."""
+    if not size or size < 0:
+        return "0 B"
+    size_name = ("B", "KB", "MB", "GB", "TB")
+    i = int(math.floor(math.log(size, 1024))) if size > 0 else 0
+    p = math.pow(1024, i)
+    s = round(size / p, 2)
+    return f"{s} {size_name[i]}"
 
-# Conservative MP4 compatibility list because streams are COPIED, not re-encoded.
-MP4_AUDIO_CODECS = {"aac", "mp3", "ac3", "eac3", "alac"}
-# For exact subtitle copying, SubRip cannot simply be copied into MP4 as mov_text.
-# Therefore MP4 is selected only when subtitles are already mov_text.
-MP4_SUBTITLE_CODECS = {"mov_text"}
+def human_time(seconds: float) -> str:
+    """Format seconds into HH:MM:SS or MM:SS strings."""
+    if not seconds or seconds < 0 or math.isinf(seconds) or math.isnan(seconds):
+        return "00:00"
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    if h > 0:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
 
+def generate_progress_bar(percentage: float, length: int = 10) -> str:
+    """Generate an ASCII visual progress bar."""
+    filled_length = int(round(length * percentage / 100))
+    bar = '■' * filled_length + '□' * (length - filled_length)
+    return bar
 
-def human_size(size: int) -> str:
-    if size < 1024:
-        return f"{size} B"
-    if size < 1024 ** 2:
-        return f"{size / 1024:.2f} KB"
-    if size < 1024 ** 3:
-        return f"{size / 1024 ** 2:.2f} MB"
-    return f"{size / 1024 ** 3:.2f} GB"
-
-
-def safe_filename(filename: str) -> str:
-    filename = os.path.basename(filename or "video")
-    filename = re.sub(r"[^\w.\- ()\[\]]+", "_", filename)
-    filename = filename.strip(" .")
-    return filename or "video"
-
-
-def mp4_can_contain_audio(media: MediaInfo) -> bool:
-    return all((a.codec or "").lower() in MP4_AUDIO_CODECS for a in media.audios)
-
-
-def mp4_can_contain_subtitles(media: MediaInfo) -> bool:
-    return all((s.codec or "").lower() in MP4_SUBTITLE_CODECS for s in media.subtitles)
-
-
-def choose_output_extension(media: MediaInfo) -> str:
-    # Multiple video streams are kept safely in MKV.
-    if len(media.videos) > 1:
-        return ".mkv"
-    if not mp4_can_contain_audio(media):
-        return ".mkv"
-    if not mp4_can_contain_subtitles(media):
-        return ".mkv"
-    return ".mp4"
-
-
-def build_output_path(input_file: str, media: MediaInfo) -> str:
-    source = Path(input_file)
-    return str(source.with_name(f"{source.stem}_compressed{choose_output_extension(media)}"))
-
-
-def make_progress_bar(percentage: float, width: int = 12) -> str:
-    percentage = max(0.0, min(100.0, percentage))
-    filled = int(width * percentage / 100)
-    return "â– " * filled + "â–¡" * (width - filled)
-
-
-def safe_remove(path: Optional[str]) -> None:
-    if not path:
-        return
-    try:
-        if os.path.isfile(path):
-            os.remove(path)
-    except OSError:
-        pass
+def cleanup_files(*file_paths: Path):
+    """Safely delete arbitrary files or paths if they exist."""
+    for path in file_paths:
+        if path and isinstance(path, Path):
+            try:
+                if path.is_file() or path.is_symlink():
+                    path.unlink(missing_ok=True)
+            except Exception as e:
+                print(f"Failed to cleanup file {path}: {e}")
