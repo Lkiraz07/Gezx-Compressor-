@@ -1,268 +1,148 @@
-import asyncio
-import os
 import re
-from dataclasses import dataclass
-from typing import Awaitable, Callable, Optional
+import asyncio
+from pathlib import Path
+from typing import Callable, Optional, Dict, Any
+from media import MediaInfo
 
-from media import MediaInfo, choose_video_stream
+class VideoCompressor:
+    @staticmethod
+    def calculate_adaptive_params(media: MediaInfo) -> Dict[str, Any]:
+        """
+        Dynamically determine CRF and encoding preset based on resolution, bitrate,
+        and frame rate without arbitrarily stripping stream properties.
+        """
+        res_pixels = media.width * media.height
+        
+        # Base CRF baseline selection
+        if res_pixels >= 3840 * 2160: # 4K
+            crf = 26
+            preset = "veryfast"
+        elif res_pixels >= 1920 * 1080: # 1080p
+            crf = 24
+            preset = "veryfast"
+        elif res_pixels >= 1280 * 720: # 720p
+            crf = 23
+            preset = "faster"
+        else: # Standard definition
+            crf = 22
+            preset = "faster"
 
+        # Adjust CRF for high frame rates
+        if media.fps >= 50:
+            crf += 1
 
-@dataclass
-class CompressionResult:
-    output_file: str
-    original_size: int
-    output_size: int
-    crf: int
-    duration: float
+        # Bitrate safety adjustments (Avoid re-encoding low-bitrate streams aggressively)
+        # Standard bitrates in bps: 1080p high is ~8Mbps, 720p is ~3.5Mbps
+        if media.video_bitrate > 0:
+            kbps = media.video_bitrate / 1000.0
+            if res_pixels >= 1920 * 1080 and kbps < 2500:
+                crf -= 2 # Light compression to protect already low bitrate
+            elif res_pixels >= 1280 * 720 and kbps < 1200:
+                crf -= 2
 
+        # Sanity check CRF values
+        crf = max(18, min(32, crf))
 
-def clamp(value: int, minimum: int, maximum: int) -> int:
-    return max(minimum, min(value, maximum))
+        return {
+            "crf": crf,
+            "preset": preset
+        }
 
+    @classmethod
+    async def compress(
+        cls,
+        input_path: Path,
+        output_path: Path,
+        media: MediaInfo,
+        progress_callback: Optional[Callable[[float, float, float], None]] = None,
+        cancel_event: Optional[asyncio.Event] = None
+    ) -> bool:
+        """
+        Executes FFmpeg compression with real-time stderr stdout parsing.
+        Maintains all audio/subtitle streams (-c:a copy, -c:s copy).
+        """
+        params = cls.calculate_adaptive_params(media)
+        
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel", "info",
+            "-i", str(input_path),
+            "-map", "0",              # Map all video, audio, subtitle streams
+            "-c:v", "libx264",        # Encode video with standard x264
+            "-crf", str(params["crf"]),
+            "-preset", params["preset"],
+            "-c:a", "copy",           # Copy all audio streams as-is
+            "-c:s", "copy",           # Copy all subtitle streams as-is
+            "-map_metadata", "0",     # Preserve global metadata
+            "-map_chapters", "0"      # Preserve chapters
+        ]
 
-def calculate_crf(media: MediaInfo) -> int:
-    video = choose_video_stream(media)
-    height = video.height
-    fps = video.fps or 30.0
-    source_bitrate = video.bitrate or media.bitrate or 0
+        # Enable faststart for web/telegram streaming if output container is MP4
+        if output_path.suffix.lower() == ".mp4":
+            cmd.extend(["-movflags", "+faststart"])
 
-    if height >= 2160:
-        crf = 27
-    elif height >= 1440:
-        crf = 26
-    elif height >= 1080:
-        crf = 24
-    elif height >= 720:
-        crf = 23
-    elif height >= 480:
-        crf = 23
-    else:
-        crf = 22
+        cmd.append(str(output_path))
 
-    if source_bitrate >= 20_000_000:
-        crf += 2
-    elif source_bitrate >= 12_000_000:
-        crf += 1
+        process = None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
 
-    if 0 < source_bitrate <= 900_000:
-        crf -= 2
-    elif 0 < source_bitrate <= 1_500_000:
-        crf -= 1
+            # Regex pattern to match FFmpeg progress line: time=00:01:23.45
+            time_pattern = re.compile(r"time=(\d+):(\d+):(\d+\.\d+)")
+            speed_pattern = re.compile(r"speed=\s*([\d\.]+)x")
 
-    if fps >= 60:
-        crf -= 1
+            start_time = asyncio.get_event_loop().time()
 
-    return clamp(crf, 20, 30)
+            async for line_bytes in process.stderr:
+                if cancel_event and cancel_event.is_set():
+                    print("Cancel signal detected. Terminating FFmpeg process...")
+                    try:
+                        process.terminate()
+                        await process.wait()
+                    except Exception:
+                        pass
+                    return False
 
+                line = line_bytes.decode('utf-8', errors='ignore')
+                time_match = time_pattern.search(line)
+                
+                if time_match and media.duration > 0:
+                    hours, minutes, seconds = map(float, time_match.groups())
+                    current_seconds = hours * 3600 + minutes * 60 + seconds
+                    percentage = min(100.0, (current_seconds / media.duration) * 100.0)
 
-def parse_ffmpeg_time(text: str) -> float:
-    match = re.search(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)", text)
-    if not match:
-        return 0.0
-    return int(match.group(1)) * 3600 + int(match.group(2)) * 60 + float(match.group(3))
+                    speed = 1.0
+                    speed_match = speed_pattern.search(line)
+                    if speed_match:
+                        try:
+                            speed = float(speed_match.group(1))
+                        except ValueError:
+                            speed = 1.0
 
+                    # Calculate ETA
+                    remaining_sec = media.duration - current_seconds
+                    eta = remaining_sec / speed if speed > 0 else 0
 
-def build_ffmpeg_command(input_file: str, output_file: str, media: MediaInfo, crf: int) -> list[str]:
-    mp4_output = output_file.lower().endswith(".mp4")
-    command = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats",
-        "-progress", "pipe:2", "-y", "-i", input_file,
-    ]
+                    if progress_callback:
+                        if asyncio.iscoroutinefunction(progress_callback):
+                            await progress_callback(percentage, speed, eta)
+                        else:
+                            progress_callback(percentage, speed, eta)
 
-    # Main video is re-encoded. Additional video streams are copied.
-    for out_idx, _video in enumerate(media.videos):
-        command += ["-map", f"0:v:{out_idx}"]
-        if out_idx == 0:
-            command += [
-                f"-c:v:{out_idx}", "libx264",
-                f"-preset:v:{out_idx}", "veryfast",
-                f"-crf:v:{out_idx}", str(crf),
-                f"-pix_fmt:v:{out_idx}", "yuv420p",
-            ]
-        else:
-            command += [f"-c:v:{out_idx}", "copy"]
+            await process.wait()
+            return process.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0
 
-    command += ["-map", "0:a?", "-c:a", "copy"]
-    command += ["-map", "0:s?", "-c:s", "copy"]
-    command += ["-map_metadata", "0", "-map_chapters", "0"]
-
-    if mp4_output:
-        command += ["-movflags", "+faststart"]
-
-    command.append(output_file)
-    return command
-
-
-async def compress_video(
-    input_file: str,
-    output_file: str,
-    media: MediaInfo,
-    progress_callback: Optional[Callable[[dict], Awaitable[None]]] = None,
-    cancel_callback: Optional[Callable[[], Awaitable[bool]]] = None,
-) -> CompressionResult:
-    crf = calculate_crf(media)
-    command = build_ffmpeg_command(input_file, output_file, media, crf)
-    print("Running FFmpeg:", " ".join(command))
-
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
-    )
-
-    duration = media.duration
-
-    try:
-        while True:
-            if cancel_callback:
-                try:
-                    if await cancel_callback():
-                        raise asyncio.CancelledError
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    pass
-
-            line = await process.stderr.readline()
-            if not line:
-                break
-
-            text = line.decode(errors="replace").strip()
-            if not text:
-                continue
-
-            # FFmpeg -progress outputs key=value pairs.
-            if text.startswith("out_time="):
-                encoded_seconds = parse_ffmpeg_time("time=" + text.split("=", 1)[1])
-                if progress_callback:
-                    await progress_callback({
-                        "percent": (encoded_seconds / duration * 100) if duration > 0 else 0.0,
-                        "encoded_seconds": encoded_seconds,
-                        "duration": duration,
-                        "crf": crf,
-                    })
-
-            elif text == "progress=end" and progress_callback:
-                await progress_callback({
-                    "percent": 100.0,
-                    "encoded_seconds": duration,
-                    "duration": duration,
-                    "crf": crf,
-                })
-
-        return_code = await process.wait()
-        if return_code != 0:
-            raise RuntimeError(f"FFmpeg exited with code {return_code}.")
-
-        if not os.path.isfile(output_file):
-            raise RuntimeError("FFmpeg finished but no output file was created.")
-
-        original_size = os.path.getsize(input_file)
-        output_size = os.path.getsize(output_file)
-        return CompressionResult(output_file, original_size, output_size, crf, duration)
-
-    except asyncio.CancelledError:
-        if process.returncode is None:
-            try:
-                process.terminate()
-                await asyncio.wait_for(process.wait(), timeout=5)
-            except Exception:
+        except Exception as e:
+            print(f"Exception encountered during FFmpeg execution: {e}")
+            if process:
                 try:
                     process.kill()
                 except Exception:
                     pass
-        if os.path.exists(output_file):
-            try:
-                os.remove(output_file)
-            except OSError:
-                pass
-        raise
-    except Exception:
-        if process.returncode is None:
-            try:
-                process.terminate()
-            except ProcessLookupError:
-                pass
-        if os.path.exists(output_file):
-            try:
-                os.remove(output_file)
-            except OSError:
-                pass
-        raise￼Enter asyncio
-import os
-import re
-from dataclasses import dataclass
-from typing import Awaitable, Callable, Optional
-
-from media import MediaInfo, choose_video_stream
-
-
-@dataclass
-class CompressionResult:
-    output_file: str
-    original_size: int
-    output_size: int
-    crf: int
-    duration: float
-
-
-def clamp(value: int, minimum: int, maximum: int) -> int:
-    return max(minimum, min(value, maximum))
-
-
-def calculate_crf(media: MediaInfo) -> int:
-    video = choose_video_stream(media)
-    height = video.height
-    fps = video.fps or 30.0
-    source_bitrate = video.bitrate or media.bitrate or 0
-
-    if height >= 2160:
-        crf = 27
-    elif height >= 1440:
-        crf = 26
-    elif height >= 1080:
-        crf = 24
-    elif height >= 720:
-        crf = 23
-    elif height >= 480:
-        crf = 23
-    else:
-        crf = 22
-
-    if source_bitrate >= 20_000_000:
-        crf += 2
-    elif source_bitrate >= 12_000_000:
-        crf += 1
-
-    if 0 < source_bitrate <= 900_000:
-        crf -= 2
-    elif 0 < source_bitrate <= 1_500_000:
-        crf -= 1
-
-    if fps >= 60:
-        crf -= 1
-
-    return clamp(crf, 20, 30)
-
-
-def parse_ffmpeg_time(text: str) -> float:
-    match = re.search(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)", text)
-    if not match:
-        return 0.0
-    return int(match.group(1)) * 3600 + int(match.group(2)) * 60 + float(match.group(3))
-
-
-def build_ffmpeg_command(input_file: str, output_file: str, media: MediaInfo, crf: int) -> list[str]:
-    mp4_output = output_file.lower().endswith(".mp4")
-    command = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats",
-        "-progress", "pipe:2", "-y", "-i", input_file,
-    ]
-
-    # Main video is re-encoded. Additional video streams are copied.
-    for out_idx, _video in enumerate(media.videos):
-        command += ["-map", f"0:v:{out_idx}"]
-        if out_idx == 0:
-            command += [
-                f"-c:v:{out_idx}", "libx264",
-                f"-preset:v:{out_idx}", "veryfast",
+            return False
